@@ -847,7 +847,10 @@ async function main() {
   } catch (error) {
     throw new RelayError("configuration", `unable to read GitHub event: ${sanitizeForComment(error.message, 500)}`, { cause: error });
   }
-  await processRelayEvent(event, { runId: process.env.PR_RELAY_RUN_ID ?? "unknown" });
+  const result = await processRelayEvent(event, { runId: process.env.PR_RELAY_RUN_ID ?? "unknown" });
+  if (result?.state === "failed") {
+    process.exitCode = 1;
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
