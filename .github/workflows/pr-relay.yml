@@ -1,0 +1,45 @@
+name: PR relay
+
+on:
+  issues:
+    types: [opened, edited, reopened, labeled]
+
+# The workflow token is read-only. All requested writes are made by the separately
+# scoped PR_RELAY_TOKEN after the trusted relay code has validated the payload.
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-relay-${{ github.repository }}-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  relay:
+    if: >-
+      vars.PR_RELAY_ENABLED == 'true' &&
+      (github.event.action == 'opened' ||
+       github.event.action == 'edited' ||
+       github.event.action == 'reopened' ||
+       (github.event.action == 'labeled' && github.event.label.name == 'relay/retry'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GITHUB_EVENT_PATH: ${{ github.event_path }}
+      PR_RELAY_ENABLED: ${{ vars.PR_RELAY_ENABLED }}
+      PR_RELAY_RUN_ID: ${{ github.run_id }}
+      PR_RELAY_TOKEN: ${{ secrets.PR_RELAY_TOKEN }}
+      PR_RELAY_ALLOWED_SENSITIVE_PATHS: ${{ vars.PR_RELAY_ALLOWED_SENSITIVE_PATHS }}
+    steps:
+      - name: Check out trusted relay code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run relay
+        run: node scripts/relay.mjs

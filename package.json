@@ -1,0 +1,13 @@
+{
+  "name": "pr-relay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A data-only GitHub issue to fork PR relay.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

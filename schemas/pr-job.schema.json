@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aryansk/pr-relay/blob/main/schemas/pr-job.schema.json",
+  "title": "PR relay job",
+  "description": "A deliberately data-only request for one fork branch and one upstream pull request.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "upstream",
+    "fork",
+    "base",
+    "branch",
+    "commitMessage",
+    "prTitle",
+    "prBody",
+    "patch",
+    "draft"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "upstream": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})?/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,99})?$"
+    },
+    "fork": {
+      "type": "string",
+      "pattern": "^aryansk/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,99})?$"
+    },
+    "base": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*[A-Za-z0-9]$",
+      "maxLength": 120
+    },
+    "branch": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*[A-Za-z0-9]$",
+      "maxLength": 120
+    },
+    "commitMessage": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "prTitle": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "prBody": {
+      "type": "string",
+      "maxLength": 16000
+    },
+    "patch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 524288
+    },
+    "draft": {
+      "type": "boolean"
+    },
+    "upstreamIssue": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 999999999
+    }
+  }
+}
