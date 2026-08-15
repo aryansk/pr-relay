@@ -685,6 +685,14 @@ async function setIssueState(client, issueNumber, state) {
   }
 }
 
+async function removeRetryLabelBestEffort(client, issueNumber) {
+  try {
+    await client.removeIssueLabel(RELAY_REPOSITORY, issueNumber, RETRY_LABEL);
+  } catch (error) {
+    console.error(sanitizeForComment(`Unable to remove retry label after success: ${error?.message ?? error}`, 800));
+  }
+}
+
 function buildResultComment(jobId, state, details = {}) {
   const marker = resultMarker(jobId, state);
   if (state === "success") {
@@ -783,6 +791,7 @@ export async function processRelayEvent(event, { client, enabled = process.env.P
       if (!url) throw new RelayError("duplicate-protection", "an existing pull request was found but has no usable URL");
       await setIssueState(github, issue.number, "success");
       await terminalCommentIfMissing(github, issue.number, initialComments, jobId, buildResultComment(jobId, "success", { prUrl: url, branch: job.branch, sha: "existing pull request" }), "success");
+      await removeRetryLabelBestEffort(github, issue.number);
       return { state: "success", existing: true, prUrl: url };
     }
     if (duplicate?.kind === "branch") {
@@ -813,6 +822,7 @@ export async function processRelayEvent(event, { client, enabled = process.env.P
     if (!prUrl) throw new RelayError("pull-request", "GitHub did not return a pull request URL");
     await setIssueState(github, issue.number, "success");
     await terminalCommentIfMissing(github, issue.number, initialComments, jobId, buildResultComment(jobId, "success", { prUrl, branch: job.branch, sha: commit.sha }), "success");
+    await removeRetryLabelBestEffort(github, issue.number);
     return { state: "success", prUrl, sha: commit.sha, changedPaths: commit.changedPaths };
   } catch (error) {
     const relayError = error instanceof RelayError ? error : new RelayError("unknown", sanitizeForComment(error?.message ?? error, 800), { cause: error });
