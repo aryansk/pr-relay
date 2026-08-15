@@ -147,6 +147,7 @@ test("rejects symlink and Git metadata paths through shared path validation", ()
 test("parses only the deterministic relay title and JSON body shapes", () => {
   assert.deepEqual(parseRelayTitle("[pr-relay] octo/project #1985"), { repository: "octo/project", issueNumber: 1985 });
   assertRelayError(() => parseRelayTitle("[pr-relay] octo/project"), /title/);
+  assertRelayError(() => parseRelayTitle("[pr-relay] octo/project #1000000000"), /title/);
   assert.deepEqual(parseIssueBody(JSON.stringify(validJob())), validJob());
   assert.deepEqual(parseIssueBody(`\`\`\`json\n${JSON.stringify(validJob())}\n\`\`\``), validJob());
   assertRelayError(() => parseIssueBody("explanation\n{"), /one JSON object/);

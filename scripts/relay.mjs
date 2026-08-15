@@ -352,7 +352,7 @@ export function parseIssueBody(body) {
 
 export function parseRelayTitle(title) {
   if (typeof title !== "string" || !title.startsWith("[pr-relay]")) return null;
-  const match = /^\[pr-relay\]\s+([^\s]+)\s+#([1-9][0-9]*)$/.exec(title.trim());
+  const match = /^\[pr-relay\]\s+([^\s]+)\s+#([1-9][0-9]{0,8})$/.exec(title.trim());
   if (!match) {
     throw new RelayError("payload-validation", "title must be exactly [pr-relay] owner/repository #issue-number");
   }
