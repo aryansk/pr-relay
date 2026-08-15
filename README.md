@@ -23,6 +23,31 @@ aryansk fork branch -> upstream pull request -> relay issue result
 
 The workflow uses a read-only `GITHUB_TOKEN` for checkout. Requested GitHub writes use `PR_RELAY_TOKEN`, which is never hard-coded and is never printed. The repository variable `PR_RELAY_ENABLED` defaults to a safe disabled state until explicitly enabled.
 
+## Zero-click queue
+
+The relay also supports a public, read-only Vercel queue without moving any GitHub credential to Vercel:
+
+```text
+ChatGPT publishes validated job -> Vercel queue
+        -> scheduled GitHub poller every 5 minutes
+        -> [pr-relay] GitHub issue
+        -> existing issue-triggered relay
+        -> aryansk fork branch
+        -> upstream draft PR
+```
+
+The configured endpoint is:
+
+```text
+https://pr-relay-trigger-aryanbsk12345-4414s-projects.vercel.app/api/jobs
+```
+
+The `poll_queue` job also supports `workflow_dispatch` for a manual poll. It uses the existing `PR_RELAY_TOKEN` Actions secret and the same `PR_RELAY_ENABLED` kill switch. Queue polling and issue processing have separate concurrency groups: queue polls cannot overlap, while issue-triggered runs remain isolated by relay issue number.
+
+The queue must return exactly one object with `version: 1` and at most five jobs. Each job has exactly `id`, `title`, and `body`; the ID is a short safe ASCII identifier, the title follows the normal `[pr-relay] owner/repository #123` format, and the body is the exact JSON relay body that will be placed into the GitHub issue. The poller uses the existing `parseRelayTitle`, `parseIssueBody`, and `validateJob` checks before any issue write. It rejects non-HTTPS or redirected endpoints, non-200 responses, oversized/malformed responses, unexpected fields, duplicate IDs, invalid jobs, and title/upstream mismatches.
+
+The poller never clones repositories, applies patches, or executes job data. It reads recent `aryansk/pr-relay` issues, validates their JSON bodies, and skips a queued job when its validated branch is already present. Otherwise it creates exactly one relay issue with the supplied title and body; the existing `issues: opened` path performs all GitHub relay work. A malformed queue or invalid job is rejected before any issue is created. `PR_RELAY_TOKEN` remains only in GitHub Actions and is never sent to Vercel.
+
 ## Security model and restrictions
 
 The issue body, title, patch, repository names, branch names, commit message, and PR text are untrusted input.
@@ -147,6 +172,7 @@ A short reusable prompt is:
 ## Troubleshooting
 
 - **No workflow run:** check that Actions are enabled, `PR_RELAY_ENABLED` is exactly `true`, the issue title starts with `[pr-relay]`, and the event is `opened`, `edited`, `reopened`, or an explicit `relay/retry` label event.
+- **Queue returns 401/302 or another non-200 response:** the Vercel `/api/jobs` URL is not publicly readable, is behind deployment protection/SSO, or is redirecting. Make that endpoint genuinely public and read-only, or update the configured public endpoint in the relay. Do not put `PR_RELAY_TOKEN` in Vercel and do not weaken the poller's HTTP-200/redirect checks.
 - **Authentication failure:** verify the secret name is exactly `PR_RELAY_TOKEN`, the classic PAT has not expired/revoked, and it has the `repo` scope. Rotate it by creating a replacement, updating the repository secret, then revoking the old token.
 - **Repository validation failure:** the upstream must be public, the fork must already exist under `aryansk`, and GitHub's fork metadata must identify that exact upstream as its direct parent.
 - **Duplicate-protection failure:** inspect the requested branch and existing PRs. The relay will not overwrite an existing fork branch or force-push it. Use a new branch and a new relay issue only when the existing work is intentionally separate.

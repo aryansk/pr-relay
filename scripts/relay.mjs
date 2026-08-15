@@ -607,6 +607,19 @@ export class GithubClient {
     return this.request("GET", `/repos/${repository}/issues/${issueNumber}`);
   }
 
+  async listIssues(repository, query = {}) {
+    return this.list(`/repos/${repository}/issues`, {
+      state: "all",
+      sort: "created",
+      direction: "desc",
+      ...query,
+    });
+  }
+
+  async createIssue(repository, payload) {
+    return this.request("POST", `/repos/${repository}/issues`, { body: payload });
+  }
+
   async getIssueComments(repository, issueNumber) {
     return this.list(`/repos/${repository}/issues/${issueNumber}/comments`);
   }

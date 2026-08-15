@@ -3,6 +3,9 @@ name: PR relay
 on:
   issues:
     types: [opened, edited, reopened, labeled]
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
 
 # The workflow token is read-only. All requested writes are made by the separately
 # scoped PR_RELAY_TOKEN after the trusted relay code has validated the payload.
@@ -42,3 +45,30 @@ jobs:
 
       - name: Run relay
         run: node scripts/relay.mjs
+
+  poll_queue:
+    if: >-
+      vars.PR_RELAY_ENABLED == 'true' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    concurrency:
+      group: pr-relay-queue-${{ github.repository }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PR_RELAY_ENABLED: ${{ vars.PR_RELAY_ENABLED }}
+      PR_RELAY_TOKEN: ${{ secrets.PR_RELAY_TOKEN }}
+    steps:
+      - name: Check out trusted relay code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+
+      - name: Poll Vercel queue
+        run: node scripts/poll-queue.mjs
