@@ -23,30 +23,26 @@ aryansk fork branch -> upstream pull request -> relay issue result
 
 The workflow uses a read-only `GITHUB_TOKEN` for checkout. Requested GitHub writes use `PR_RELAY_TOKEN`, which is never hard-coded and is never printed. The repository variable `PR_RELAY_ENABLED` defaults to a safe disabled state until explicitly enabled.
 
-## Zero-click queue
+## Zero-click Airtable queue
 
-The relay also supports a public, read-only Vercel queue without moving any GitHub credential to Vercel:
+ChatGPT writes validated jobs to the Airtable Jobs table. GitHub Actions reads that table directly every five minutes; no intermediary service is required:
 
 ```text
-ChatGPT publishes validated job -> Vercel queue
-        -> scheduled GitHub poller every 5 minutes
+ChatGPT creates Airtable Pending record
+        -> scheduled GitHub Actions Airtable poller
         -> [pr-relay] GitHub issue
         -> existing issue-triggered relay
         -> aryansk fork branch
         -> upstream draft PR
 ```
 
-The configured endpoint is:
+The `poll_queue` job supports both the `*/5 * * * *` schedule and `workflow_dispatch`. It uses the `AIRTABLE_TOKEN` Actions secret for Airtable reads/status updates, the existing `PR_RELAY_TOKEN` secret only for GitHub writes, and the same `PR_RELAY_ENABLED` kill switch. Queue polling and issue processing have separate concurrency groups: queue polls cannot overlap, while issue-triggered runs remain isolated by relay issue number.
 
-```text
-https://pr-relay-trigger-aryanbsk12345-4414s-projects.vercel.app/api/jobs
-```
+The poller reads base `appppBJ8XPrwVIi3L`, table `tblntNqkRKxAiP0G8`, using the configured field IDs. It considers only `Pending` rows, sorts them by Airtable `createdTime` oldest-first, and processes at most five per poll. `Job ID`, `Title`, `Body`, and `Branch` map directly to the validated relay job. `Consumed` and `Failed` rows are ignored.
 
-The `poll_queue` job also supports `workflow_dispatch` for a manual poll. It uses the existing `PR_RELAY_TOKEN` Actions secret and the same `PR_RELAY_ENABLED` kill switch. Queue polling and issue processing have separate concurrency groups: queue polls cannot overlap, while issue-triggered runs remain isolated by relay issue number.
+Create an Airtable personal access token at **Airtable → Developer hub → Personal access tokens** with only `data.records:read` and `data.records:write` access restricted to the PR Relay Queue base. Store it directly as the GitHub Actions repository secret `AIRTABLE_TOKEN`; never put it in an issue, source code, or ChatGPT. `PR_RELAY_TOKEN` remains only in GitHub Actions.
 
-The queue must return exactly one object with `version: 1` and at most five jobs. Each job has exactly `id`, `title`, and `body`; the ID is a short safe ASCII identifier, the title follows the normal `[pr-relay] owner/repository #123` format, and the body is the exact JSON relay body that will be placed into the GitHub issue. The poller uses the existing `parseRelayTitle`, `parseIssueBody`, and `validateJob` checks before any issue write. It rejects non-HTTPS or redirected endpoints, non-200 responses, oversized/malformed responses, unexpected fields, duplicate IDs, invalid jobs, and title/upstream mismatches.
-
-The poller never clones repositories, applies patches, or executes job data. It reads recent `aryansk/pr-relay` issues, validates their JSON bodies, and skips a queued job when its validated branch is already present. Otherwise it creates exactly one relay issue with the supplied title and body; the existing `issues: opened` path performs all GitHub relay work. A malformed queue or invalid job is rejected before any issue is created. `PR_RELAY_TOKEN` remains only in GitHub Actions and is never sent to Vercel.
+Before any GitHub issue write, the poller reuses `parseRelayTitle`, `parseIssueBody`, and `validateJob`. A permanently malformed Pending row is marked `Failed`. If its validated branch already appears in an existing relay issue, the row is marked `Consumed` without creating an issue. Otherwise the poller creates exactly one relay issue and marks the Airtable row `Consumed` only after successful creation. GitHub/Airtable transient failures leave the row Pending and fail the workflow so the next poll can retry safely.
 
 ## Security model and restrictions
 
@@ -172,7 +168,8 @@ A short reusable prompt is:
 ## Troubleshooting
 
 - **No workflow run:** check that Actions are enabled, `PR_RELAY_ENABLED` is exactly `true`, the issue title starts with `[pr-relay]`, and the event is `opened`, `edited`, `reopened`, or an explicit `relay/retry` label event.
-- **Queue returns 401/302 or another non-200 response:** the Vercel `/api/jobs` URL is not publicly readable, is behind deployment protection/SSO, or is redirecting. Make that endpoint genuinely public and read-only, or update the configured public endpoint in the relay. Do not put `PR_RELAY_TOKEN` in Vercel and do not weaken the poller's HTTP-200/redirect checks.
+- **Airtable queue read failure:** verify that the `AIRTABLE_TOKEN` GitHub Actions secret exists, has read/write access to the PR Relay Queue base, and that the configured base, table, and field IDs still match Airtable.
+- **Airtable status update failure:** the row remains Pending and the workflow fails safely; inspect Airtable/API availability and let the next scheduled poll retry. Existing branch/issue dedupe prevents duplicate relay work.
 - **Authentication failure:** verify the secret name is exactly `PR_RELAY_TOKEN`, the classic PAT has not expired/revoked, and it has the `repo` scope. Rotate it by creating a replacement, updating the repository secret, then revoking the old token.
 - **Repository validation failure:** the upstream must be public, the fork must already exist under `aryansk`, and GitHub's fork metadata must identify that exact upstream as its direct parent.
 - **Duplicate-protection failure:** inspect the requested branch and existing PRs. The relay will not overwrite an existing fork branch or force-push it. Use a new branch and a new relay issue only when the existing work is intentionally separate.

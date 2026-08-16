@@ -58,6 +58,7 @@ jobs:
     env:
       PR_RELAY_ENABLED: ${{ vars.PR_RELAY_ENABLED }}
       PR_RELAY_TOKEN: ${{ secrets.PR_RELAY_TOKEN }}
+      AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
     steps:
       - name: Check out trusted relay code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -70,5 +71,5 @@ jobs:
         with:
           node-version: 20
 
-      - name: Poll Vercel queue
+      - name: Poll Airtable queue
         run: node scripts/poll-queue.mjs

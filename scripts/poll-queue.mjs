@@ -5,18 +5,42 @@ import {
   RelayError,
   parseIssueBody,
   parseRelayTitle,
+  redactSecrets,
   sanitizeForComment,
   validateJob,
 } from "./relay.mjs";
 
-export const QUEUE_URL = "https://pr-relay-trigger-aryanbsk12345-4414s-projects.vercel.app/api/jobs";
+export const AIRTABLE_BASE_ID = "appppBJ8XPrwVIi3L";
+export const AIRTABLE_TABLE_ID = "tblntNqkRKxAiP0G8";
+export const AIRTABLE_API_URL = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${AIRTABLE_TABLE_ID}`;
+export const AIRTABLE_TIMEOUT_MS = 10 * 1000;
+export const MAX_AIRTABLE_RESPONSE_BYTES = 1024 * 1024;
+export const MAX_AIRTABLE_RECORDS = 500;
+export const AIRTABLE_PAGE_SIZE = 100;
 export const MAX_QUEUE_JOBS = 5;
-export const MAX_QUEUE_RESPONSE_BYTES = 1024 * 1024;
-export const QUEUE_TIMEOUT_MS = 10 * 1000;
 export const MAX_QUEUE_ID_BYTES = 128;
 
-const QUEUE_ENDPOINT = new URL(QUEUE_URL);
+export const AIRTABLE_FIELDS = Object.freeze({
+  jobId: "fld2cEL0l1LtDMxqk",
+  title: "fldopC8sU2uvu2Mqj",
+  body: "fldmdxkoS9TCrCCC2",
+  branch: "fldRVu17rw957qtqR",
+  status: "fldbo5Rk4VUs9zCET",
+  batchId: "fldMkcGqGQmT2EZtJ",
+});
+
+const AIRTABLE_FIELD_NAMES = Object.freeze({
+  [AIRTABLE_FIELDS.jobId]: "Job ID",
+  [AIRTABLE_FIELDS.title]: "Title",
+  [AIRTABLE_FIELDS.body]: "Body",
+  [AIRTABLE_FIELDS.branch]: "Branch",
+  [AIRTABLE_FIELDS.status]: "Status",
+  [AIRTABLE_FIELDS.batchId]: "Batch ID",
+});
+
 const QUEUE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const AIRTABLE_RECORD_ID_RE = /^rec[A-Za-z0-9]{14}$/;
+const AIRTABLE_STATUSES = new Set(["Pending", "Consumed", "Failed"]);
 
 function isPlainObject(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -24,38 +48,52 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-function queueError(stage, message, cause) {
-  return new RelayError(stage, sanitizeForComment(message, 1_200), { cause });
+function byteLength(value) {
+  return Buffer.byteLength(String(value), "utf8");
 }
 
-function requireExactKeys(value, expected, label) {
-  if (!isPlainObject(value)) throw queueError("queue-validation", `${label} must be a JSON object`);
-  const actual = Object.keys(value).sort();
-  const allowed = [...expected].sort();
-  if (actual.length !== allowed.length || actual.some((key, index) => key !== allowed[index])) {
-    throw queueError("queue-validation", `${label} contains unexpected or missing fields`);
-  }
+function fieldValue(fields, fieldId) {
+  if (!isPlainObject(fields)) return undefined;
+  if (Object.prototype.hasOwnProperty.call(fields, fieldId)) return fields[fieldId];
+  return fields[AIRTABLE_FIELD_NAMES[fieldId]];
 }
 
-function validateQueueEndpoint(value) {
-  let endpoint;
-  try {
-    endpoint = new URL(value);
-  } catch (error) {
-    throw queueError("queue-fetch", "queue endpoint URL is invalid", error);
+function scalarString(value) {
+  if (typeof value === "string") return value;
+  if (isPlainObject(value) && typeof value.name === "string") return value.name;
+  return null;
+}
+
+function safeErrorMessage(error, secrets = []) {
+  let message = String(error?.message ?? error ?? "unknown error");
+  for (const secret of secrets) {
+    if (typeof secret === "string" && secret.length > 0) message = message.split(secret).join("[redacted-token]");
   }
-  if (
-    endpoint.protocol !== "https:" ||
-    endpoint.origin !== QUEUE_ENDPOINT.origin ||
-    endpoint.pathname !== QUEUE_ENDPOINT.pathname ||
-    endpoint.search ||
-    endpoint.hash ||
-    endpoint.username ||
-    endpoint.password
-  ) {
-    throw queueError("queue-fetch", "queue endpoint must be the configured HTTPS Vercel endpoint");
+  return sanitizeForComment(message, 1_200);
+}
+
+export function sanitizeQueueDiagnostic(value, { airtableToken = process.env.AIRTABLE_TOKEN, githubToken = process.env.PR_RELAY_TOKEN } = {}) {
+  let text = redactSecrets(String(value ?? ""), githubToken);
+  text = redactSecrets(text, airtableToken);
+  return sanitizeForComment(text, 1_500);
+}
+
+function queueError(stage, message) {
+  return new RelayError(stage, sanitizeQueueDiagnostic(message));
+}
+
+function requireToken(token) {
+  if (typeof token !== "string" || token.length === 0) {
+    throw new RelayError("airtable-auth", "AIRTABLE_TOKEN is not configured");
   }
-  return endpoint;
+  return token;
+}
+
+function requireAirtableRecordId(recordId, index) {
+  if (typeof recordId !== "string" || !AIRTABLE_RECORD_ID_RE.test(recordId)) {
+    throw queueError("airtable-validation", `Airtable record ${index + 1} has an invalid record id`);
+  }
+  return recordId;
 }
 
 function headerValue(response, name) {
@@ -65,10 +103,10 @@ function headerValue(response, name) {
 async function readBoundedResponseText(response, maxBytes) {
   const contentLength = headerValue(response, "content-length");
   if (contentLength !== null) {
-    if (!/^\d+$/.test(contentLength)) throw queueError("queue-response", "queue response content length is invalid");
+    if (!/^\d+$/.test(contentLength)) throw queueError("airtable-response", "Airtable response content length is invalid");
     const declaredBytes = Number(contentLength);
     if (!Number.isSafeInteger(declaredBytes) || declaredBytes > maxBytes) {
-      throw queueError("queue-response", `queue response exceeds the ${maxBytes}-byte limit`);
+      throw queueError("airtable-response", "Airtable response is too large");
     }
   }
 
@@ -84,7 +122,7 @@ async function readBoundedResponseText(response, maxBytes) {
         totalBytes += chunk.byteLength;
         if (totalBytes > maxBytes) {
           await reader.cancel().catch(() => {});
-          throw queueError("queue-response", `queue response exceeds the ${maxBytes}-byte limit`);
+          throw queueError("airtable-response", "Airtable response is too large");
         }
         chunks.push(Buffer.from(chunk));
       }
@@ -94,134 +132,192 @@ async function readBoundedResponseText(response, maxBytes) {
     return Buffer.concat(chunks, totalBytes).toString("utf8");
   }
 
-  if (typeof response?.text !== "function") throw queueError("queue-response", "queue response body is unreadable");
+  if (typeof response?.text !== "function") throw queueError("airtable-response", "Airtable response body is unreadable");
   const text = await response.text();
-  if (Buffer.byteLength(text, "utf8") > maxBytes) {
-    throw queueError("queue-response", `queue response exceeds the ${maxBytes}-byte limit`);
-  }
+  if (byteLength(text) > maxBytes) throw queueError("airtable-response", "Airtable response is too large");
   return text;
 }
 
-export async function fetchQueuePayload({
-  queueUrl = QUEUE_URL,
-  fetchImpl = globalThis.fetch,
-  timeoutMs = QUEUE_TIMEOUT_MS,
-  maxBytes = MAX_QUEUE_RESPONSE_BYTES,
-} = {}) {
-  const endpoint = validateQueueEndpoint(queueUrl);
-  if (typeof fetchImpl !== "function") throw queueError("queue-fetch", "Node fetch is unavailable");
+function airtableUrl(offset) {
+  const url = new URL(AIRTABLE_API_URL);
+  url.searchParams.set("pageSize", String(AIRTABLE_PAGE_SIZE));
+  url.searchParams.set("maxRecords", String(MAX_AIRTABLE_RECORDS));
+  url.searchParams.set("returnFieldsByFieldId", "true");
+  url.searchParams.set("filterByFormula", '{Status}="Pending"');
+  for (const fieldId of Object.values(AIRTABLE_FIELDS)) url.searchParams.append("fields[]", fieldId);
+  if (offset) url.searchParams.set("offset", offset);
+  return url;
+}
 
+async function fetchAirtablePage({ token, fetchImpl, offset }) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  let response;
+  const timer = setTimeout(() => controller.abort(), AIRTABLE_TIMEOUT_MS);
   try {
+    let response;
     try {
-      response = await fetchImpl(endpoint.toString(), {
+      response = await fetchImpl(airtableUrl(offset), {
         method: "GET",
-        headers: { accept: "application/json" },
-        redirect: "manual",
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${token}`,
+        },
+        redirect: "error",
         signal: controller.signal,
       });
     } catch (error) {
-      if (error?.name === "AbortError") {
-        throw queueError("queue-timeout", `queue request timed out after ${timeoutMs}ms`, error);
-      }
-      throw queueError("queue-fetch", `queue request failed: ${error?.message ?? error}`, error);
+      if (error?.name === "AbortError") throw new RelayError("airtable-timeout", "Airtable request timed out");
+      throw new RelayError("airtable-read", "Airtable request failed");
     }
 
-    if (typeof response?.url === "string" && response.url) {
-      try {
-        validateQueueEndpoint(response.url);
-      } catch (error) {
-        throw queueError("queue-fetch", "queue response came from an unexpected URL", error);
-      }
+    if (response?.status !== 200) {
+      throw new RelayError("airtable-read", `Airtable returned HTTP ${response?.status ?? "unknown"}`);
     }
 
-    if (response.status >= 300 && response.status < 400) {
-      const location = headerValue(response, "location");
-      if (location) {
-        try {
-          const redirected = new URL(location, endpoint);
-          if (redirected.protocol !== "https:" || redirected.origin !== endpoint.origin) {
-            throw queueError("queue-fetch", "queue redirect targets an unexpected host or non-HTTPS URL");
-          }
-        } catch (error) {
-          if (error instanceof RelayError) throw error;
-          throw queueError("queue-fetch", "queue redirect location is invalid", error);
-        }
-      }
-      throw queueError("queue-fetch", "queue redirects are not accepted");
-    }
-    if (response.status !== 200) {
-      throw queueError("queue-fetch", `queue endpoint returned HTTP ${response.status}`);
-    }
-
-    let text;
+    const text = await readBoundedResponseText(response, MAX_AIRTABLE_RESPONSE_BYTES);
+    let payload;
     try {
-      text = await readBoundedResponseText(response, maxBytes);
+      payload = JSON.parse(text);
     } catch (error) {
-      if (error instanceof RelayError) throw error;
-      throw queueError("queue-response", `unable to read queue response: ${error?.message ?? error}`, error);
+      throw new RelayError("airtable-response", "Airtable response was not valid JSON");
     }
-    try {
-      return JSON.parse(text);
-    } catch (error) {
-      throw queueError("queue-parse", `queue response is not valid JSON: ${error.message}`, error);
+    if (!isPlainObject(payload) || !Array.isArray(payload.records)) {
+      throw new RelayError("airtable-response", "Airtable response had an invalid record list");
     }
+    if (payload.offset !== undefined && typeof payload.offset !== "string") {
+      throw new RelayError("airtable-response", "Airtable response had an invalid pagination offset");
+    }
+    return { records: payload.records, offset: payload.offset ?? null };
+  } catch (error) {
+    if (error instanceof RelayError) throw error;
+    throw new RelayError("airtable-read", "Airtable request could not be completed");
   } finally {
     clearTimeout(timer);
   }
 }
 
-function validateQueueId(value, index) {
-  if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_QUEUE_ID_BYTES || !QUEUE_ID_RE.test(value)) {
-    throw queueError("queue-validation", `queue job ${index + 1} has an invalid id`);
+export async function fetchPendingRecords({ token = process.env.AIRTABLE_TOKEN, fetchImpl = globalThis.fetch } = {}) {
+  requireToken(token);
+  if (typeof fetchImpl !== "function") throw new RelayError("airtable-read", "Node fetch is unavailable");
+
+  const records = [];
+  let offset = null;
+  for (let page = 0; page < Math.ceil(MAX_AIRTABLE_RECORDS / AIRTABLE_PAGE_SIZE); page += 1) {
+    const result = await fetchAirtablePage({ token, fetchImpl, offset });
+    records.push(...result.records);
+    if (!result.offset || records.length >= MAX_AIRTABLE_RECORDS) break;
+    offset = result.offset;
   }
-  return value;
+  return records.slice(0, MAX_AIRTABLE_RECORDS);
 }
 
-export function validateQueuedJob(value, index = 0) {
-  requireExactKeys(value, ["id", "title", "body"], `queue job ${index + 1}`);
-  const id = validateQueueId(value.id, index);
-  if (typeof value.title !== "string") throw queueError("queue-validation", `queue job ${index + 1} title must be a string`);
-  if (typeof value.body !== "string" || Buffer.byteLength(value.body, "utf8") > MAX_ISSUE_BODY_BYTES) {
-    throw queueError("queue-validation", `queue job ${index + 1} body is too large or is not text`);
+function createdTimestamp(record) {
+  const timestamp = Date.parse(record?.createdTime ?? "");
+  return Number.isFinite(timestamp) ? timestamp : Number.POSITIVE_INFINITY;
+}
+
+export function selectPendingRecords(records) {
+  if (!Array.isArray(records)) throw new RelayError("airtable-response", "Airtable record list was invalid");
+  return records
+    .map((record, index) => ({ record, index, createdAt: createdTimestamp(record) }))
+    .filter(({ record }) => scalarString(fieldValue(record?.fields, AIRTABLE_FIELDS.status)) === "Pending")
+    .sort((left, right) => left.createdAt - right.createdAt || left.index - right.index)
+    .slice(0, MAX_QUEUE_JOBS)
+    .map(({ record }) => record);
+}
+
+export function validatePendingRecord(record, index = 0) {
+  if (!isPlainObject(record)) throw queueError("queue-validation", `Airtable record ${index + 1} is not an object`);
+  const recordId = requireAirtableRecordId(record.id, index);
+  if (!Number.isFinite(Date.parse(record.createdTime ?? ""))) {
+    throw queueError("queue-validation", `Airtable record ${index + 1} has an invalid createdTime`);
+  }
+  if (!isPlainObject(record.fields)) throw queueError("queue-validation", `Airtable record ${index + 1} has invalid fields`);
+
+  const status = scalarString(fieldValue(record.fields, AIRTABLE_FIELDS.status));
+  if (status !== "Pending") return null;
+
+  const id = scalarString(fieldValue(record.fields, AIRTABLE_FIELDS.jobId));
+  if (!id || byteLength(id) > MAX_QUEUE_ID_BYTES || !QUEUE_ID_RE.test(id)) {
+    throw queueError("queue-validation", `Airtable record ${index + 1} has an invalid Job ID`);
+  }
+  const title = scalarString(fieldValue(record.fields, AIRTABLE_FIELDS.title));
+  const body = scalarString(fieldValue(record.fields, AIRTABLE_FIELDS.body));
+  const branch = scalarString(fieldValue(record.fields, AIRTABLE_FIELDS.branch));
+  if (!title || !body || !branch) {
+    throw queueError("queue-validation", `Airtable record ${index + 1} is missing required relay fields`);
+  }
+  if (byteLength(body) > MAX_ISSUE_BODY_BYTES) {
+    throw queueError("queue-validation", `Airtable record ${index + 1} body is too large`);
   }
 
+  let titleInfo;
+  let job;
   try {
-    const title = parseRelayTitle(value.title);
-    if (!title) throw queueError("queue-validation", `queue job ${index + 1} title must start with [pr-relay]`);
-    const raw = parseIssueBody(value.body);
-    const job = validateJob(raw);
-    if (title.repository.toLowerCase() !== job.upstream.toLowerCase()) {
-      throw queueError("queue-validation", `queue job ${index + 1} title repository and payload upstream do not match`);
-    }
-    if (job.upstreamIssue !== undefined && job.upstreamIssue !== title.issueNumber) {
-      throw queueError("queue-validation", `queue job ${index + 1} upstreamIssue does not match the title`);
-    }
-    return { id, title: value.title, body: value.body, job, titleInfo: title };
+    titleInfo = parseRelayTitle(title);
+    if (!titleInfo) throw new RelayError("payload-validation", "title must start with [pr-relay]");
+    job = validateJob(parseIssueBody(body));
   } catch (error) {
-    if (error instanceof RelayError && error.stage === "queue-validation") throw error;
-    throw queueError("queue-validation", `queue job ${index + 1} relay payload is invalid: ${error?.message ?? error}`, error);
+    throw queueError("queue-validation", `Airtable record ${index + 1} relay payload is invalid: ${safeErrorMessage(error)}`);
   }
+  if (titleInfo.repository.toLowerCase() !== job.upstream.toLowerCase()) {
+    throw queueError("queue-validation", `Airtable record ${index + 1} title repository and payload upstream do not match`);
+  }
+  if (job.upstreamIssue !== undefined && job.upstreamIssue !== titleInfo.issueNumber) {
+    throw queueError("queue-validation", `Airtable record ${index + 1} upstreamIssue does not match the title`);
+  }
+  if (branch !== job.branch) {
+    throw queueError("queue-validation", `Airtable record ${index + 1} Branch does not match the validated payload branch`);
+  }
+
+  return {
+    recordId,
+    id,
+    title,
+    body,
+    branch,
+    job,
+    titleInfo,
+    createdAt: Date.parse(record.createdTime),
+  };
 }
 
-export function validateQueuePayload(value) {
-  requireExactKeys(value, ["version", "jobs"], "queue response");
-  if (value.version !== 1) throw queueError("queue-validation", "queue version must be 1");
-  if (!Array.isArray(value.jobs)) throw queueError("queue-validation", "queue jobs must be an array");
-  if (value.jobs.length > MAX_QUEUE_JOBS) {
-    throw queueError("queue-validation", `queue may contain at most ${MAX_QUEUE_JOBS} jobs per poll`);
-  }
+function statusUrl(recordId) {
+  return `${AIRTABLE_API_URL}/${encodeURIComponent(recordId)}`;
+}
 
-  const ids = new Set();
-  const jobs = value.jobs.map((item, index) => {
-    const validated = validateQueuedJob(item, index);
-    if (ids.has(validated.id)) throw queueError("queue-validation", `queue contains duplicate job id: ${validated.id}`);
-    ids.add(validated.id);
-    return validated;
-  });
-  return { version: 1, jobs };
+export async function updateAirtableStatus(recordId, status, { token = process.env.AIRTABLE_TOKEN, fetchImpl = globalThis.fetch } = {}) {
+  requireToken(token);
+  if (!AIRTABLE_RECORD_ID_RE.test(recordId)) throw new RelayError("airtable-write", "Airtable record id is invalid");
+  if (!AIRTABLE_STATUSES.has(status)) throw new RelayError("airtable-write", "Airtable status is invalid");
+  if (typeof fetchImpl !== "function") throw new RelayError("airtable-write", "Node fetch is unavailable");
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AIRTABLE_TIMEOUT_MS);
+  try {
+    try {
+      const response = await fetchImpl(statusUrl(recordId), {
+        method: "PATCH",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+          authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ fields: { [AIRTABLE_FIELDS.status]: status } }),
+        redirect: "error",
+        signal: controller.signal,
+      });
+      if (response?.status !== 200) {
+        throw new RelayError("airtable-write", `Airtable status update returned HTTP ${response?.status ?? "unknown"}`);
+      }
+      return true;
+    } catch (error) {
+      if (error?.name === "AbortError") throw new RelayError("airtable-timeout", "Airtable status update timed out");
+      if (error instanceof RelayError) throw error;
+      throw new RelayError("airtable-write", "Airtable status update failed");
+    }
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function issueAlreadyContainsBranch(issues, branch) {
@@ -239,53 +335,75 @@ export function issueAlreadyContainsBranch(issues, branch) {
   });
 }
 
-async function safeGithubRead(client) {
+async function safeGithubRead(client, secrets) {
   try {
     const issues = await client.listIssues(RELAY_REPOSITORY);
     if (!Array.isArray(issues)) throw new Error("GitHub returned an invalid issue list");
     return issues;
   } catch (error) {
-    throw queueError("github-read", `unable to read relay issues: ${error?.message ?? error}`, error);
+    throw queueError("github-read", `unable to read relay issues: ${safeErrorMessage(error, secrets)}`);
   }
 }
 
-async function safeGithubCreate(client, queuedJob) {
+async function safeGithubCreate(client, queuedJob, secrets) {
   try {
     return await client.createIssue(RELAY_REPOSITORY, { title: queuedJob.title, body: queuedJob.body });
   } catch (error) {
-    throw queueError("github-write", `unable to create relay issue for queue job ${queuedJob.id}: ${error?.message ?? error}`, error);
+    throw queueError("github-write", `unable to create relay issue for queue job ${queuedJob.id}: ${safeErrorMessage(error, secrets)}`);
   }
+}
+
+async function markStatus(record, status, { airtableToken, fetchImpl }) {
+  return updateAirtableStatus(record.recordId, status, { token: airtableToken, fetchImpl });
 }
 
 export async function pollQueue({
   enabled = process.env.PR_RELAY_ENABLED === "true",
-  token = process.env.PR_RELAY_TOKEN,
+  airtableToken = process.env.AIRTABLE_TOKEN,
+  githubToken = process.env.PR_RELAY_TOKEN,
   client,
   fetchImpl = globalThis.fetch,
-  queueUrl = QUEUE_URL,
 } = {}) {
-  if (!enabled) return { state: "disabled", created: [], skipped: [], total: 0 };
+  if (!enabled) return { state: "disabled", created: [], skipped: [], failed: [], total: 0 };
 
-  const payload = await fetchQueuePayload({ queueUrl, fetchImpl });
-  const queue = validateQueuePayload(payload);
-  if (queue.jobs.length === 0) return { state: "completed", created: [], skipped: [], total: 0 };
+  const records = selectPendingRecords(await fetchPendingRecords({ token: airtableToken, fetchImpl }));
+  const failed = [];
+  const valid = [];
 
-  const github = client ?? new GithubClient(token);
-  const knownIssues = await safeGithubRead(github);
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    try {
+      const queuedJob = validatePendingRecord(record, index);
+      if (queuedJob) valid.push(queuedJob);
+    } catch (error) {
+      const recordId = record?.id;
+      if (!AIRTABLE_RECORD_ID_RE.test(recordId ?? "")) throw error;
+      await updateAirtableStatus(recordId, "Failed", { token: airtableToken, fetchImpl });
+      failed.push(recordId);
+    }
+  }
+
+  if (valid.length === 0) return { state: "completed", created: [], skipped: [], failed, total: records.length };
+
+  const github = client ?? new GithubClient(githubToken);
+  const secrets = [airtableToken, githubToken];
+  const knownIssues = await safeGithubRead(github, secrets);
   const created = [];
   const skipped = [];
 
-  for (const queuedJob of queue.jobs) {
-    if (issueAlreadyContainsBranch(knownIssues, queuedJob.job.branch)) {
+  for (const queuedJob of valid) {
+    if (issueAlreadyContainsBranch(knownIssues, queuedJob.branch)) {
+      await markStatus(queuedJob, "Consumed", { airtableToken, fetchImpl });
       skipped.push(queuedJob.id);
       continue;
     }
-    await safeGithubCreate(github, queuedJob);
-    created.push(queuedJob.id);
+    await safeGithubCreate(github, queuedJob, secrets);
     knownIssues.push({ title: queuedJob.title, body: queuedJob.body });
+    await markStatus(queuedJob, "Consumed", { airtableToken, fetchImpl });
+    created.push(queuedJob.id);
   }
 
-  return { state: "completed", created, skipped, total: queue.jobs.length };
+  return { state: "completed", created, skipped, failed, total: records.length };
 }
 
 async function main() {
@@ -293,14 +411,19 @@ async function main() {
     console.log("PR relay queue polling disabled; no write performed.");
     return;
   }
-  const result = await pollQueue({ enabled: true, token: process.env.PR_RELAY_TOKEN });
-  console.log(`PR relay queue poll complete: total=${result.total} created=${result.created.length} skipped=${result.skipped.length}`);
+  const result = await pollQueue({
+    enabled: true,
+    airtableToken: process.env.AIRTABLE_TOKEN,
+    githubToken: process.env.PR_RELAY_TOKEN,
+  });
+  const failed = result.failed.length > 0 ? ` failed=${result.failed.length}` : "";
+  console.log(`PR relay queue poll complete: total=${result.total} created=${result.created.length} skipped=${result.skipped.length}${failed}`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((error) => {
-    const relayError = error instanceof RelayError ? error : new RelayError("queue", error?.message ?? String(error), { cause: error });
-    console.error(sanitizeForComment(`PR relay queue polling stopped [${relayError.stage}]: ${relayError.message}`, 1_500));
+    const relayError = error instanceof RelayError ? error : new RelayError("queue", "Airtable queue polling failed");
+    console.error(sanitizeQueueDiagnostic(`PR relay queue polling stopped [${relayError.stage}]: ${relayError.message}`));
     process.exitCode = 1;
   });
 }
