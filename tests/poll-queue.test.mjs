@@ -150,8 +150,8 @@ test("one valid Pending job creates exactly one issue and becomes Consumed", asy
   assert.deepEqual(airtable.statuses, [{ recordId: queued.id, status: "Consumed" }]);
 });
 
-test("five valid Pending jobs are processed", async () => {
-  const records = Array.from({ length: 5 }, (_, index) => airtableRecord({
+test("fifty valid Pending jobs are processed", async () => {
+  const records = Array.from({ length: 50 }, (_, index) => airtableRecord({
     recordNumber: index + 1,
     id: `job-${index + 1}`,
     job: {
@@ -159,18 +159,23 @@ test("five valid Pending jobs are processed", async () => {
       upstreamIssue: 2000 + index,
       prBody: `Fixes #${2000 + index}`,
     },
-    createdTime: `2026-08-16T00:0${index}:00.000Z`,
+    createdTime: new Date(Date.UTC(2026, 7, 16, 0, 0, index)).toISOString(),
   }));
   const { promise, client, airtable } = runPoll(records);
   const result = await promise;
 
-  assert.deepEqual(result.created, ["job-1", "job-2", "job-3", "job-4", "job-5"]);
-  assert.equal(client.created.length, 5);
-  assert.equal(airtable.statuses.length, 5);
+  assert.equal(MAX_QUEUE_JOBS, 50);
+  assert.deepEqual(result.created, records.map((record) => record.fields[AIRTABLE_FIELDS.jobId]));
+  assert.equal(client.created.length, 50);
+  assert.equal(airtable.statuses.length, 50);
+  assert.deepEqual(
+    airtable.statuses,
+    records.map((record) => ({ recordId: record.id, status: "Consumed" }))
+  );
 });
 
-test("more than five Pending jobs processes the oldest five", async () => {
-  const records = Array.from({ length: 7 }, (_, index) => airtableRecord({
+test("more than 50 Pending jobs processes the oldest 50 and leaves the rest Pending", async () => {
+  const records = Array.from({ length: 52 }, (_, index) => airtableRecord({
     recordNumber: index + 1,
     id: `job-${index + 1}`,
     job: {
@@ -178,15 +183,28 @@ test("more than five Pending jobs processes the oldest five", async () => {
       upstreamIssue: 2100 + index,
       prBody: `Fixes #${2100 + index}`,
     },
-    createdTime: `2026-08-16T00:0${index}:00.000Z`,
+    createdTime: new Date(Date.UTC(2026, 7, 16, 0, 0, index)).toISOString(),
   })).reverse();
   const { promise, client, airtable } = runPoll(records);
   const result = await promise;
 
-  assert.equal(MAX_QUEUE_JOBS, 5);
-  assert.deepEqual(result.created, ["job-1", "job-2", "job-3", "job-4", "job-5"]);
-  assert.deepEqual(airtable.statuses.map((item) => item.recordId), records.slice(2).reverse().map((item) => item.id));
-  assert.equal(client.created.length, 5);
+  assert.equal(MAX_QUEUE_JOBS, 50);
+  const expectedJobs = Array.from({ length: 50 }, (_, index) => `job-${index + 1}`);
+  const expectedRecords = records.slice(2).reverse();
+  assert.deepEqual(result.created, expectedJobs);
+  assert.deepEqual(airtable.statuses.map((item) => item.recordId), expectedRecords.map((item) => item.id));
+  assert.equal(client.created.length, 50);
+  assert.equal(airtable.statuses.length, 50);
+  assert.deepEqual(
+    airtable.statuses,
+    expectedRecords.map((record) => ({ recordId: record.id, status: "Consumed" }))
+  );
+
+  const remainingRecords = records.slice(0, 2);
+  const updatedRecordIds = new Set(airtable.statuses.map((item) => item.recordId));
+  for (const remaining of remainingRecords) {
+    assert.equal(updatedRecordIds.has(remaining.id), false);
+  }
 });
 
 test("Consumed and Failed rows are ignored", async () => {

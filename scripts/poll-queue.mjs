@@ -17,7 +17,7 @@ export const AIRTABLE_TIMEOUT_MS = 10 * 1000;
 export const MAX_AIRTABLE_RESPONSE_BYTES = 1024 * 1024;
 export const MAX_AIRTABLE_RECORDS = 500;
 export const AIRTABLE_PAGE_SIZE = 100;
-export const MAX_QUEUE_JOBS = 5;
+export const MAX_QUEUE_JOBS = 50;
 export const MAX_QUEUE_ID_BYTES = 128;
 
 export const AIRTABLE_FIELDS = Object.freeze({
