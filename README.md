@@ -38,7 +38,7 @@ ChatGPT creates Airtable Pending record
 
 The `poll_queue` job supports both the `*/5 * * * *` schedule and `workflow_dispatch`. It uses the `AIRTABLE_TOKEN` Actions secret for Airtable reads/status updates, the existing `PR_RELAY_TOKEN` secret only for GitHub writes, and the same `PR_RELAY_ENABLED` kill switch. Queue polling and issue processing have separate concurrency groups: queue polls cannot overlap, while issue-triggered runs remain isolated by relay issue number.
 
-The poller reads base `appppBJ8XPrwVIi3L`, table `tblntNqkRKxAiP0G8`, using the configured field IDs. It considers only `Pending` rows, sorts them by Airtable `createdTime` oldest-first, and processes at most five per poll. `Job ID`, `Title`, `Body`, and `Branch` map directly to the validated relay job. `Consumed` and `Failed` rows are ignored.
+The poller reads base `appppBJ8XPrwVIi3L`, table `tblntNqkRKxAiP0G8`, using the configured field IDs. It considers only `Pending` rows, sorts them by Airtable `createdTime` oldest-first, and processes at most 50 jobs per poll. `Job ID`, `Title`, `Body`, and `Branch` map directly to the validated relay job. `Consumed` and `Failed` rows are ignored.
 
 Create an Airtable personal access token at **Airtable → Developer hub → Personal access tokens** with only `data.records:read` and `data.records:write` access restricted to the PR Relay Queue base. Store it directly as the GitHub Actions repository secret `AIRTABLE_TOKEN`; never put it in an issue, source code, or ChatGPT. `PR_RELAY_TOKEN` remains only in GitHub Actions.
 
